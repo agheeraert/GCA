@@ -143,6 +143,8 @@ class GCA():
 
         #Creates an iterator over labels to get the trajectory labels
         if type(labels) != type(None):
+            if type(labels) != list:
+                labels = [labels]
             assert len(labels) == len(trajs), print("""Length of labels and
             trajectories differ""")
             self.traj_labels = list()
@@ -153,7 +155,7 @@ class GCA():
         #If a single topology is in the input, we assume the same topology is 
         # used for all trajectories. Also works for single traj/topology.
         if type(topos) == str:
-            u_iter = iter(mda.Universe(topos, trajs))
+            u_iter = iter([mda.Universe(topos, trajs)])
         else:
             u_iter = iter(mda.Universe(topo, traj) 
                     for topo, traj in zip(topos, trajs))
@@ -163,7 +165,6 @@ class GCA():
         #Transforms information in numpy 1-D array for faster computations
 #        dtypes = np.ushort, np.ushort, np.uintc, np.ubyte
 #        print([(arr[0].dtype if type(arr[0]) != list else 0) for arr in [self.contacts1, self.contacts2, self.times, self.counts]])
-        self.to_pickle('preconcat.p')
         self.contacts1 = np.concatenate(self.contacts1, dtype=np.ushort)
         self.contacts2 = np.concatenate(self.contacts2, dtype=np.ushort)
         self.times = np.concatenate(self.times, dtype=np.uintc)
@@ -177,7 +178,6 @@ class GCA():
             self.times = self.times[to_keep]
             self.counts = self.counts[to_keep]
 
-        print('ok avant unique')
         #Gets the list of unique contacts
         contacts = np.stack([self.contacts1, self.contacts2], axis=-1)
         unique_contacts, inv = np.unique(contacts, axis=0, 
