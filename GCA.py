@@ -13,6 +13,7 @@ import matplotlib.lines as mlines
 from itertools import combinations
 import pandas as pd
 import seaborn as sns
+import pickle as pkl
 
 mpl.rc('figure', fc = 'white')
 mpl.rcParams.update({'font.size': 12})
@@ -44,8 +45,9 @@ class GCA():
     --------
     """
 
-    def __init__(self, cutoff=5.0):
+    def __init__(self, cutoff=5.0, begin=0, end=-1, stride=1):
         self.cutoff = cutoff
+        self.slice = slice(begin, end, stride)
 
     def standard_analysis(self, output_list=None, max_compo=4, **kwargs):
         """Follows a series of standard instructions for GCAnalysis 
@@ -55,8 +57,8 @@ class GCA():
         if output_list == None:
             output_list = ['df_trajnet.dfp', 
                             '12pca.dfp', 
+                            'influences_12pc.dfp',
                             'scree_plot.svg',
-                            'influences_12pc.dfp' 
                             'PC1vPC2.svg', 
                             'pca{}.dfp'.format(max_compo),
                             '{}PCxy_plot.svg'.format(max_compo), 
@@ -64,10 +66,11 @@ class GCA():
                             'ward_hierarchy_acceleration.svg',
                             'optimal_clustering.svg',
                             'simulations_cluster_evolution.svg',
-                            'clustered_contact_networks.dfp']
-        output_list = iter(output_list)
+                            'clustered_contact_networks.dfp',
+                            'GCA.p']
 
-        self.compute_cmat(next(output_list), **kwargs)
+        output_list = iter(output_list)
+        self.compute_cmat(to_df=next(output_list), **kwargs)
         self.compute_pca(next(output_list), n_components=12)
         self.get_features_pca(next(output_list))
         self.scree_plot(next(output_list))
@@ -79,6 +82,7 @@ class GCA():
         self.plot_optimal_clusters(next(output_list))
         self.plot_cluster_time_evolution(next(output_list))
         self.get_clusters_networks(next(output_list))
+        self.to_pickle(next(output_list))
 
 
     def compute_cmat(self, trajs, topos, to_df=None, sele='not name H*', 
@@ -155,35 +159,43 @@ class GCA():
                     for topo, traj in zip(topos, trajs))
         for u in u_iter:
             self._compute_contacts(u)
+        
         #Transforms information in numpy 1-D array for faster computations
-        self.contacts1, self.contacts2, self.times, self.counts = list(map(
-            np.concatenate, [self.contacts1, 
-                             self.contacts2, 
-                             self.times, 
-                             self.counts]))
+#        dtypes = np.ushort, np.ushort, np.uintc, np.ubyte
+#        print([(arr[0].dtype if type(arr[0]) != list else 0) for arr in [self.contacts1, self.contacts2, self.times, self.counts]])
+        self.to_pickle('preconcat.p')
+        self.contacts1 = np.concatenate(self.contacts1, dtype=np.ushort)
+        self.contacts2 = np.concatenate(self.contacts2, dtype=np.ushort)
+        self.times = np.concatenate(self.times, dtype=np.uintc)
+        self.counts = np.concatenate(self.counts, dtype=np.ubyte)
 
         #Removes intraresidual contacts
         if remove_intra:
-            to_remove = np.where(self.contacts1 == self.contacts2)[0]
-            self.contacts1 = self.contacts1[~to_remove]
-            self.contacts2 = self.contacts2[~to_remove]
-        
+            to_keep = np.where(self.contacts1 != self.contacts2)[0]
+            self.contacts1 = self.contacts1[to_keep]
+            self.contacts2 = self.contacts2[to_keep]
+            self.times = self.times[to_keep]
+            self.counts = self.counts[to_keep]
+
+        print('ok avant unique')
         #Gets the list of unique contacts
         contacts = np.stack([self.contacts1, self.contacts2], axis=-1)
-        unique_contacts, inv = np.unique(contacts, axis=-1, 
+        unique_contacts, inv = np.unique(contacts, axis=0, 
                                         return_inverse=True)
         #Saving unique_contacts to re-build contacts name
         self.id2contact = unique_contacts
-
+        print('ok avant sparse matrix')
         #Build contact matrix with coo matrix and transforms then to dense
         contact_matrix = coo_matrix((self.counts, (inv, self.times)), 
-                            shape=(unique_contacts.shape[0], self.t))
-        self.contact_matrix = contact_matrix.todense()
+                            shape=(unique_contacts.shape[0], self.t),
+                            dtype=np.uint8)
+        print('ok avant dense')
+        self.contact_matrix = np.array(contact_matrix.todense())
         if type(self.traj_labels) == list:
             self.traj_labels = np.array(self.traj_labels)
             if type(to_df) == str:
-                df = pd.DataFrame({'res1': self.id2contact[0],
-                                    'res2': self.id2contact[1]})
+                df = pd.DataFrame({'res1': self.id2contact[:, 0],
+                                    'res2': self.id2contact[:, 1]})
                 for label in pd.unique(self.traj_labels):
                     ix = np.where(self.traj_labels == label)[0]
                     df[label] = np.average(self.contact_matrix[:, ix], axis=1)
@@ -210,19 +222,19 @@ class GCA():
         assert hasattr(self, 'contact_matrix'), print(
             "Contact matrix not computed")
         #Computes PCA
-        self.pca_mat = self.pca.fit_transform(self.contact_matrix)
+        self.pca_mat = self.pca.fit_transform(self.contact_matrix.T)
         self.pca_df = pd.DataFrame({'PC{}'.format(i+1): self.pca_mat[:, i]
-                                for i in self.pca.n_components})
-        if type(self.traj_labels) == list:
+                                for i in range(self.pca.n_components)})
+        if type(self.traj_labels) in [list, np.ndarray]:
             self.pca_df[label_name] = self.traj_labels
             self.traj_label_name = label_name
-        if type(self.output) != type(None):
+        if type(output) != type(None):
             self.pca_df.to_pickle(output)
 
     def get_features_pca(self, output_df):
-        features = pd.DataFrame({'res1': self.id2contact[0],
-                                    'res2': self.id2contact[1]})
-        for i in self.pca.n_components:
+        features = pd.DataFrame({'res1': self.id2contact[:, 0],
+                                    'res2': self.id2contact[:, 1]})
+        for i in range(self.pca.n_components):
             features['PC{}'.format(i+1)] = self.pca.components_[i]
         features.to_pickle(output_df)
     
@@ -249,21 +261,23 @@ class GCA():
         ax.set_ylim(0)
         ax.set_xlim(1, self.pca.n_components+1)
         ax.set_xticks(range(1, self.pca.n_components+1))
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
     
     def _individual_plot2D(self, ij, ax, color_palette="bright", 
                             show_start_finish=True, show_trajectory=False):
-        if ax == None:
+        if type(ax) == type(None):
             ax = plt.gca()
-            x = "PC{}".format(ij[0]+1)
-            y = "PC{}".format(ij[1]+1)
+
+        x = "PC{}".format(ij[0]+1)
+        y = "PC{}".format(ij[1]+1)
         if hasattr(self, "traj_label_name"):
-            if not hasattr(self, "color_trajs"):
+            if not hasattr(self, "unique_traj_labels"):
                 self._generate_colors_sim()
 
             g = sns.kdeplot(data=self.pca_df, x=x, y=y, common_norm=False, 
-            ax=ax, hue=self.traj_label_name, color_palette=color_palette,
+            ax=ax, hue=self.traj_label_name, palette=color_palette,
             legend=False)
 
             if show_start_finish:
@@ -339,21 +353,27 @@ class GCA():
         m_list = []
         if not hasattr(self, 'pca'):
             self.compute_pca(**kwargs)
+        if not hasattr(self, "unique_traj_labels"):
+            self._generate_colors_sim()
         
         if type(combi) == type(None):
             combi = list(combinations(range(0, self.pca.n_components), 2))
 
         if len(combi) <= n_horizontal:
             n_horizontal = len(combi)
-        figsize = [4*n_horizontal, n_horizontal*len(combi)//n_horizontal]
+            figsize = [12, 12]
+        else:
+            figsize = [12, n_horizontal*len(combi)//n_horizontal]
+
         fig, axes = plt.subplots(len(combi)//n_horizontal, n_horizontal, 
                                 sharex=True, sharey=True, figsize=figsize)
+        axes = np.array(axes)
         for ij, ax in zip(combi, axes.flatten()):
             #Building our own legend because the one from seaborn is a 
             #pain to handle   
             if len(m_list) == 0 and hasattr(self, "label_color_iter"):
                 m_list = [mlines.Line2D([], [], color=c, label=lab) 
-                        for (c, lab) in self.label_color_iter] 
+                        for (lab, c) in self.label_color_iter] 
             self._individual_plot2D(ij, ax, show_trajectory=show_trajectory, 
                             show_start_finish=show_start_finish,
                             color_palette=color_palette)
@@ -362,7 +382,8 @@ class GCA():
             ax.set_aspect('equal')
         #Drawing at once simulation-dependant legend
         if len(m_list) >= 1:
-            fig.legend(handles=m_list, loc='best', title=self.traj_label_name)
+            fig.legend(handles=m_list, loc='lower right', 
+            title=self.traj_label_name, ncol=2)
         
         #Building our own legend for start finish and draw it
         if show_start_finish:
@@ -373,7 +394,8 @@ class GCA():
             markeredgewidth=1.0, markeredgecolor='k', markersize=10, 
             label='End of simulation')
 
-            fig.legend(handles=[m1, m2], loc='best', numpoints=1)
+            fig.legend(handles=[m1, m2], loc='lower left', numpoints=1)
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
 
@@ -409,24 +431,35 @@ class GCA():
 
         figsize = [4*n_horizontal,
         n_horizontal*self.pca.n_components//n_horizontal]
-        fig, axes = plt.subplots(self.pca.n_components//n_horizontal, 
+
+        fig, axes = plt.subplots((self.pca.n_components//n_horizontal)+1, 
                                 n_horizontal, sharex=True, sharey=True, 
                                 figsize=figsize)
-        for i, ax in enumerate(axes.flatten()):
+        axes = np.array(axes)
+        for ax, i in zip(axes.flatten(), range(self.pca_mat.shape[1])):
+            # ax.set_title('PC{}'.format(i+1))
             if hasattr(self, "traj_label_name"):
                 if not hasattr(self, "label_color_iter"):
                     self._generate_colors_sim()
                 for label, color in self.label_color_iter:
                     ix = np.where(self.traj_labels == label)[0]
-                    ax.plot(self.pca_mat[ix, i], color=color, label=label if i==0 else None, alpha=0.8)
-                    ax.set_ylim(0, self.t/frames_per_ns)
+                    ax.plot(self.pca_mat[ix, i], color=color, 
+                            label=label if i==0 else None, alpha=0.8)
+                    ax.set_xlim(0, self.t/frames_per_ns)
                     ax.set_ylabel('PC{}'.format(i+1))
                     ax.set_xlabel('Time in ns')
-                    ax.set_xticklabels((np.array(ax.get_xticks())/frames_per_ns).astype(np.int32))
+                    ticklabels = (np.array(ax.get_xticks())
+                                /float(frames_per_ns)).astype(np.int32)
+                    ax.set_xticklabels(ticklabels)
             else:
                 ax.plot(self.pca_mat[:, i], color='k')
+        if len(axes.flatten() != self.pca_mat.shape[1]):
+            for ax in axes.flatten()[i+1:]:
+                ax.axis('off')
 
-        fig.legend(ncol=2, loc='best', fontsize=10)
+
+        fig.legend(ncol=2, loc='lower center', fontsize=10)
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
 
@@ -482,9 +515,10 @@ class GCA():
         axes[1].set_ylabel('Height')
 
         ax2.set_ylabel('Height acceleration')
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
-        mpl.rcParams.update({'font.size': 16})
+        mpl.rcParams.update({'font.size': 12})
     
     def plot_optimal_clusters(self, output, color_clusters=None, pc=(0, 1), **kwargs):
         """Draws optimal clusters in a 2D projection
@@ -530,7 +564,7 @@ class GCA():
             sns.scatterplot(x=self.pca_mat[ix, pc[0]], y=self.pca_mat[ix, pc[1]], 
                             color=c, marker='+', linewidth=1, ax=axes[1])
             m.append(mlines.Line2D([], [], color=c, marker='+',
-                                markersize=10, label='Cluster {}'.format(i)))
+                            markersize=10, label='Cluster {}'.format(i+1)))
             i+=1
         axes[1].set_aspect('equal')
         axes[1].set_xlabel('PC1')
@@ -538,6 +572,7 @@ class GCA():
         axes[1].grid('--')
         axes[1].legend(handles=m, loc='best', numpoints = 1, ncol=2, 
                     fontsize=10)
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
 
@@ -566,15 +601,18 @@ class GCA():
 
 
         if hasattr(self, "traj_labels"):
-            n_graphs = self.traj_labels
+            if not hasattr(self, "unique_traj_labels"):
+                self._generate_colors_sim()
+            n_graphs = len(self.unique_traj_labels)
         else:
             n_graphs = 1
+            self.unique_traj_labels = [""]
 
         if not hasattr(self, "cluster_labels"):
             self.plot_optimal_clusters(output=None)
         fig, axes = plt.subplots(n_graphs, 1, sharex=True, 
                                 figsize=[12, n_graphs])
-        ix = np.argsort(pd.unique())
+        ix = np.argsort(pd.unique(self.cluster_labels))
         cmap = mpl.colors.ListedColormap(np.array(self.color_clusters)[ix])
         bounds=list(range(len(self.color_clusters)+1))
         norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
@@ -592,19 +630,23 @@ class GCA():
         ax.set_xlabel('Time in ns')
         #plt.tight_layout()
         [ax.set_yticks([]) for ax in axes.flatten()]
+        plt.tight_layout()
         plt.savefig(output)
         plt.close(fig)
 
     def get_clusters_networks(self, output):
         assert hasattr(self, "cluster_labels"), print("""Optimal clustering 
         hasn't been done.""")
-        features = pd.DataFrame({'res1': self.id2contact[0],
-                                 'res2': self.id2contact[1]})
+        features = pd.DataFrame({'res1': self.id2contact[:, 0],
+                                 'res2': self.id2contact[:, 1]})
         for traj_lab in pd.unique(self.cluster_labels):
             ix = np.where(self.cluster_labels==traj_lab)[0]
             features['cluster_{}'.format(traj_lab)] = np.mean(
                 self.contact_matrix[:,ix], axis=1)
         features.to_pickle(output)
+
+    def to_pickle(self, output):
+        pkl.dump(self, open(output, 'wb'))
         
     
     def _compute_contacts(self, u):
@@ -628,11 +670,11 @@ class GCA():
             self.ix2 = np.array(self.s2.atoms.indices)
 
         #Iterates over frames to compute contacts
-        for _t, ts in enumerate(tqdm(u.trajectory)):
+        for _t, ts in enumerate(tqdm(u.trajectory[self.slice])):
             if type(self.sele2) == type(None):
-                pairs = self._get_pairs_sym()
+                pairs = self._contacts_sym()
             else:
-                pairs = self._get_pairs_asym()
+                pairs = self._contacts_asym()
             U, inv = np.unique(pairs, return_inverse=True)
             #Translates atomic contact information in residue contact info
             pairs_res = np.array(
@@ -640,13 +682,15 @@ class GCA():
             unique_pairs, counts = np.unique(pairs_res, axis=1, 
                                             return_counts=True)
             #Stores information in four different lists
-            self.contacts1.append(unique_pairs[0]) #res1 in contact
-            self.contacts2.append(unique_pairs[1]) #res2 in contact
-            self.counts.append(counts) #number of contact
-            self.times.append([self.t+_t]*unique_pairs.shape[1]) #timestep
-        self.t += _t #shifts the timestep for a series of trajectories
+            self.contacts1.append(unique_pairs[0].astype(np.ushort)) #res1 
+            self.contacts2.append(unique_pairs[1].astype(np.ushort)) #res2 
+            self.counts.append(counts.astype(np.ushort)) #number of contact
+            self.times.append(np.array(
+                [self.t+_t]*unique_pairs.shape[1]).astype(np.uintc)) #timestep
         if type(self.traj_labels) == list:
-            self.traj_labels += [next(self.iter_traj_labels)]*_t
+            self.traj_labels += [next(self.iter_traj_labels)]*(_t+1)
+        self.t += (_t+1) #shifts the timestep for a series of trajectories
+
 
     def _generate_colors_sim(self, color_palette="bright"):
         """ Generates colors, labels and corresponding zipped iterator
@@ -655,7 +699,8 @@ class GCA():
         self.n_traj_labels = len(pd.unique(self.traj_labels))
         self.color_trajs = sns.color_palette(color_palette, 
                                                 self.n_traj_labels)
-        self.label_color_iter = zip(self.unique_traj_labels, self.color_trajs)
+        self.label_color_iter = list(zip(self.unique_traj_labels, 
+                                        self.color_trajs))
 
 
     def _contacts_sym(self):
