@@ -85,9 +85,10 @@ class GCA():
         self.to_pickle(next(output_list))
 
 
-    def compute_cmat(self, trajs, topos, to_df=None, sele='not name H*', 
-                    sele2=None, remove_intra=True, remove_duplicates=True, 
-                    labels=None):
+    def compute_cmat(self, trajs, topos, to_df=None, 
+                    sele='protein and not name H*', sele2=None, 
+                    remove_intra=True, remove_duplicates=True, labels=None):
+
         """Computes the contact matrix from one or more trajectories and 
         topologies.
         
@@ -104,7 +105,7 @@ class GCA():
             Save an average for each simulation to a pickle DataFrame.
             Allows to draw Perturbation Networks with an external function
 
-        sele: str, default = 'not name H*' i.e. heavy-atom contacts
+        sele: str, default = 'protein and not name H*' i.e heavy-atom contacts
             Atoms selected for contact analysis. Use MDAnalysis atom selection
             reference (close to CHARMM’s atom selection syntax). See notes for
             atom selection
@@ -165,10 +166,10 @@ class GCA():
         #Transforms information in numpy 1-D array for faster computations
 #        dtypes = np.ushort, np.ushort, np.uintc, np.ubyte
 #        print([(arr[0].dtype if type(arr[0]) != list else 0) for arr in [self.contacts1, self.contacts2, self.times, self.counts]])
-        self.contacts1 = np.concatenate(self.contacts1, dtype=np.ushort)
-        self.contacts2 = np.concatenate(self.contacts2, dtype=np.ushort)
-        self.times = np.concatenate(self.times, dtype=np.uintc)
-        self.counts = np.concatenate(self.counts, dtype=np.ubyte)
+        self.contacts1 = np.concatenate(self.contacts1)
+        self.contacts2 = np.concatenate(self.contacts2)
+        self.times = np.concatenate(self.times)
+        self.counts = np.concatenate(self.counts)
 
         #Removes intraresidual contacts
         if remove_intra:
